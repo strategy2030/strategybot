@@ -1,7 +1,7 @@
 """
 Чат-бот управляющей компании для мессенджера MAX.
 Функции: регистрация жильцов (телефон, ФИО, адрес), приём заявок с номером,
-статус заявки по номеру, аварийные ситуации, информация по дому, контакты УК,
+статус заявки по номеру, аварийные ситуации (объявления от УК), контакты УК,
 обновление статусов и публикация объявлений сотрудниками.
 
 Запуск: python bot.py
@@ -37,7 +37,7 @@ ADMIN_IDS = {82205193, 6198981}
 WORK_CHAT_ID = -80938009169161
 
 CONTACTS = (
-    "☎️ **Контакты УК Стратегия 2030**\n\n"
+    "☎️ **Контакты управляющей компании**\n\n"
     "• Диспетчерская (9:00–17:00): 8 (928) 101-44-79\n"
     "• Аварийная служба: 8 (863) 303-20-03\n"
     "• Приёмная: 8 (928) 101-44-79\n"
@@ -72,30 +72,9 @@ async def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             title TEXT NOT NULL,
             description TEXT NOT NULL,
-            active INTEGER NOT NULL DEFAULT 1
-        );
-        CREATE TABLE IF NOT EXISTS house_info (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT NOT NULL,
-            text TEXT NOT NULL,
             created_at TEXT NOT NULL
         );
         """)
-        cursor = await conn.execute("SELECT COUNT(*) FROM emergencies")
-        row = await cursor.fetchone()
-        if row[0] == 0:
-            await conn.executemany(
-                "INSERT INTO emergencies (title, description) VALUES (?, ?)",
-                [
-                    ("Отключение горячей воды",
-                     "09.11–15.11 с 9:00 до 18:00 будут отключены горячие вода "
-                     "по адресам: ул. Примерная 1–10. Причина — гидравлические "
-                     "испытания."),
-                    ("Плановый ремонт лифта",
-                     "До 12.11 лифт в подъезде № 3 дома по ул. Примерной, 1 не "
-                     "работает. Ремонт окончен будет ориентировочно 12.11."),
-                ],
-            )
         await conn.commit()
 
 # ---- Работа с жильцами ----
@@ -169,31 +148,27 @@ async def set_status(number, status):
         await conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, number))
         await conn.commit()
 
-# ---- Аварии и информация по дому ----
-async def get_active_emergencies():
-    async with aiosqlite.connect(DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        cursor = await conn.execute("SELECT * FROM emergencies WHERE active = 1 ORDER BY id")
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-async def add_house_info(title, text):
+# ---- Аварийные ситуации (объявления от УК) ----
+async def add_emergency(title, text):
+    """Добавить объявление об аварийной ситуации"""
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            "INSERT INTO house_info (title, text, created_at) VALUES (?, ?, ?)",
+            "INSERT INTO emergencies (title, description, created_at) VALUES (?, ?, ?)",
             (title, text, datetime.now().strftime("%d.%m.%Y")),
         )
         await conn.commit()
 
-async def delete_house_info(info_id):
+async def delete_emergency(emergency_id):
+    """Удалить объявление об аварийной ситуации"""
     async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.execute("DELETE FROM house_info WHERE id = ?", (info_id,))
+        await conn.execute("DELETE FROM emergencies WHERE id = ?", (emergency_id,))
         await conn.commit()
 
-async def get_house_info():
+async def get_emergencies():
+    """Получить все актуальные аварийные ситуации"""
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
-        cursor = await conn.execute("SELECT * FROM house_info ORDER BY id DESC LIMIT 10")
+        cursor = await conn.execute("SELECT * FROM emergencies ORDER BY id DESC LIMIT 10")
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
@@ -215,9 +190,8 @@ def main_menu_kb(user_id=None):
         [CallbackButton(text="📝 Оставить заявку", payload="new_request", intent=Intent.POSITIVE),
          CallbackButton(text="🔍 Статус заявки", payload="check_status", intent=Intent.DEFAULT)],
         [CallbackButton(text="🚨 Аварийные ситуации", payload="emergencies", intent=Intent.NEGATIVE),
-         CallbackButton(text="🏠 Информация по дому", payload="house_info", intent=Intent.DEFAULT)],
-        [CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT),
-         CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT)],
+         CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT)],
+        [CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT)],
     ]
     # Добавляем кнопку АДМ только для админов (по user_id!)
     if user_id in ADMIN_IDS:
@@ -262,7 +236,7 @@ def menu_text():
     return ("🏠 **УК «Стратегия 2030» — бот обслуживания**\n\n"
             "Выберите действие на кнопках или напишите:\n"
             "/start — меню\n/контакты — контакты УК\n"
-            "/аварии — аварийные ситуации\n/инфо — объявления по дому")
+            "/аварии — аварийные ситуации и оповещения")
 
 def admin_menu_text():
     return ("⚙️ **Админ-панель**\n\n"
@@ -277,30 +251,17 @@ async def send_admin_menu(chat_id):
                            attachments=[admin_menu_kb()])
 
 async def send_emergencies(chat_id):
-    items = await get_active_emergencies()
+    """Показать актуальные аварийные ситуации"""
+    items = await get_emergencies()
     if not items:
         await bot.send_message(
             chat_id=chat_id,
-            text="✅ Активных аварийных ситуаций нет. Работаем в штатном режиме.",
+            text="✅ Активных аварийных ситуаций и оповещений нет. Работаем в штатном режиме.",
             attachments=[back_kb()],
         )
         return
-    text = "🚨 **Аварийные и аварийно-предупредительные события:**\n\n" + "\n\n".join(
-        f"⚠️ **{e['title']}**\n{e['description']}" for e in items
-    )
-    await bot.send_message(chat_id=chat_id, text=text, attachments=[back_kb()])
-
-async def send_house_info(chat_id):
-    items = await get_house_info()
-    if not items:
-        await bot.send_message(
-            chat_id=chat_id,
-            text="🏠 **Информация по дому**\n\nПока объявлений нет — следите за обновлениями.",
-            attachments=[back_kb()],
-        )
-        return
-    text = "🏠 **Информация по дому — актуальные объявления:**\n\n" + "\n\n".join(
-        f"📌 **{i['title']}** ({i['created_at']})\n{i['text']}" for i in items
+    text = "🚨 **Аварийные ситуации и оповещения:**\n\n" + "\n\n".join(
+        f"⚠️ **{e['title']}**\n{e['description']}\n📅 {e['created_at']}" for e in items
     )
     await bot.send_message(chat_id=chat_id, text=text, attachments=[back_kb()])
 
@@ -342,7 +303,6 @@ def get_user_id_from_message(event: MessageCreated):
 def get_user_id_from_callback(event: MessageCallback):
     """Безопасно извлекает user_id из события MessageCallback"""
     try:
-        # Пробуем разные варианты — структура может отличаться
         if hasattr(event, 'user') and event.user and hasattr(event.user, 'user_id'):
             return event.user.user_id
         if hasattr(event, 'callback') and event.callback:
@@ -380,10 +340,6 @@ async def cmd_contacts(event: MessageCreated):
 @dp.message_created(Command("аварии"))
 async def cmd_emergencies(event: MessageCreated):
     await send_emergencies(event.message.recipient.chat_id)
-
-@dp.message_created(Command("инфо"))
-async def cmd_info(event: MessageCreated):
-    await send_house_info(event.message.recipient.chat_id)
 
 # Команда для отладки — показывает ID пользователя
 @dp.message_created(Command("whoami"))
@@ -534,13 +490,13 @@ async def router(event: MessageCreated):
         # --- АДМИН: ввод текста объявления ---
         if kind == "admin_wait_announcement_text":
             title = data["title"]
-            await add_house_info(title, text)
+            await add_emergency(title, text)
             STATES.pop(chat_id, None)
             await bot.send_message(chat_id=chat_id,
                 text=f"✅ **Объявление опубликовано!**\n\n"
                      f"📌 Заголовок: {title}\n"
                      f"📝 Текст: {text}\n\n"
-                     f"Жильцы увидят его в разделе «Информация по дому».",
+                     f"Жильцы увидят его в разделе «Аварийные ситуации».",
                 attachments=[admin_menu_kb()])
             return
 
@@ -610,9 +566,6 @@ async def on_callback(event: MessageCallback):
         elif payload == "emergencies":
             await answer()
             await send_emergencies(chat_id)
-        elif payload == "house_info":
-            await answer()
-            await send_house_info(chat_id)
         elif payload == "contacts":
             await answer()
             await bot.send_message(chat_id=chat_id, text=CONTACTS, attachments=[back_kb()])
@@ -680,7 +633,7 @@ async def on_callback(event: MessageCallback):
             if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
-            items = await get_house_info()
+            items = await get_emergencies()
             if not items:
                 await bot.send_message(chat_id=chat_id,
                     text="🗑 Объявлений для удаления нет.",
@@ -702,13 +655,13 @@ async def on_callback(event: MessageCallback):
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             try:
-                info_id = int(payload.split("_")[-1])
+                emergency_id = int(payload.split("_")[-1])
             except (ValueError, IndexError):
                 await bot.send_message(chat_id=chat_id, text="Ошибка ID.")
                 return
-            await delete_house_info(info_id)
+            await delete_emergency(emergency_id)
             await bot.send_message(chat_id=chat_id,
-                text=f"✅ Объявление №{info_id} удалено.",
+                text=f"✅ Объявление №{emergency_id} удалено.",
                 attachments=[admin_menu_kb()])
 
         # --- Смена статуса через кнопки ---
