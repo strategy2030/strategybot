@@ -448,42 +448,16 @@ async def router(event: MessageCreated):
 async def on_callback(event: MessageCallback):
     """Обработчик нажатий на inline-кнопки"""
     try:
-        # Диагностика: выводим все атрибуты события
-        logging.info(f"=== CALLBACK DEBUG ===")
-        logging.info(f"event type: {type(event).__name__}")
-        logging.info(f"event attrs: {[a for a in dir(event) if not a.startswith('_')]}")
+        payload = event.callback.payload
+        callback_id = event.callback.callback_id
         
-        # Пробуем разные варианты доступа к данным
-        payload = None
-        chat_id = None
-        callback_id = None
+        # Получаем chat_id из объекта chat
+        chat_id = event.chat.chat_id if hasattr(event.chat, 'chat_id') else event.chat.id
         
-        # Вариант 1: напрямую у event
-        if hasattr(event, 'payload'):
-            payload = event.payload
-        if hasattr(event, 'chat_id'):
-            chat_id = event.chat_id
-        if hasattr(event, 'callback_id'):
-            callback_id = event.callback_id
-            
-        # Вариант 2: через event.callback
-        if hasattr(event, 'callback'):
-            cb = event.callback
-            logging.info(f"callback attrs: {[a for a in dir(cb) if not a.startswith('_')]}")
-            if payload is None and hasattr(cb, 'payload'):
-                payload = cb.payload
-            if callback_id is None and hasattr(cb, 'callback_id'):
-                callback_id = cb.callback_id
-        
-        logging.info(f"Итог: payload={payload}, chat_id={chat_id}, callback_id={callback_id}")
-        
-        if payload is None or chat_id is None:
-            logging.error("Не удалось получить payload или chat_id из события")
-            return
+        logging.info(f"Callback: payload={payload}, chat_id={chat_id}")
 
         async def answer(notification=""):
-            if callback_id:
-                await bot.send_callback(callback_id=callback_id, notification=notification)
+            await bot.send_callback(callback_id=callback_id, notification=notification)
 
         if payload == "menu":
             STATES.pop(chat_id, None)
