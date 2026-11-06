@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     Attachment, BotStarted, CallbackButton, Command,
-    MessageCallback, MessageCreated, ButtonsPayload,
+    MessageCreated, ButtonsPayload,
 )
 from maxapi.enums.intent import Intent
 
@@ -289,10 +289,12 @@ async def send_profile(chat_id):
 
 @dp.bot_started()
 async def on_started(event: BotStarted):
+    """Отправляет меню при первом запуске бота"""
     await send_menu(event.chat_id)
 
 @dp.message_created(Command("start"))
 async def cmd_start(event: MessageCreated):
+    """Отправляет меню при команде /start"""
     chat_id = event.message.recipient.chat_id
     STATES.pop(chat_id, None)
     await send_menu(chat_id)
@@ -442,70 +444,78 @@ async def router(event: MessageCreated):
     await send_menu(chat_id, "Не понял сообщение 🙂 Выберите действие на кнопке:")
 
 # Callback-события от кнопок
-@dp.message_callback()
-async def on_callback(event: MessageCallback):
-    payload = event.callback.payload
-    chat_id = event.callback.message.recipient.chat_id
-    callback_id = event.callback.callback_id
+@dp.callback_query()
+async def on_callback(event):
+    """Обработчик нажатий на inline-кнопки"""
+    try:
+        payload = event.payload
+        chat_id = event.chat_id
+        callback_id = event.callback_id
 
-    async def answer(notification=""):
-        await bot.send_callback(callback_id=callback_id, notification=notification)
+        logging.info(f"Callback получен: payload={payload}, chat_id={chat_id}")
 
-    if payload == "menu":
-        STATES.pop(chat_id, None)
-        await answer()
-        await send_menu(chat_id)
-    elif payload == "profile":
-        await answer()
-        await send_profile(chat_id)
-    elif payload == "register":
-        await answer()
-        STATES[chat_id] = ("reg_phone", {})
-        await bot.send_message(chat_id=chat_id,
-            text="📋 **Регистрация**\n\n"
-                 "Пришлите ваш номер телефона в формате +7 900 123-45-67.")
-    elif payload == "new_request":
-        await answer()
-        if not await get_user(chat_id):
+        async def answer(notification=""):
+            await bot.send_callback(callback_id=callback_id, notification=notification)
+
+        if payload == "menu":
+            STATES.pop(chat_id, None)
+            await answer()
+            await send_menu(chat_id)
+        elif payload == "profile":
+            await answer()
+            await send_profile(chat_id)
+        elif payload == "register":
+            await answer()
             STATES[chat_id] = ("reg_phone", {})
             await bot.send_message(chat_id=chat_id,
-                text="Чтобы оставить заявку, сначала пройдите регистрацию.\n\n"
-                     "📋 Пришлите ваш номер телефона в формате +7 900 123-45-67.")
-            return
-        await bot.send_message(chat_id=chat_id,
-            text="Выберите категорию заявки:", attachments=[category_kb()])
-    elif payload.startswith("cat_"):
-        category = payload[4:]
-        await answer()
-        user = await get_user(chat_id)
-        STATES[chat_id] = ("new_address", {
-            "category": category,
-            "profile_address": user["address"] if user else None,
-        })
-        hint = ""
-        if user:
-            hint = (f"\n\nАдрес из вашего профиля: {user['address']}.\n"
-                    f"Напишите «по адресу профиля», чтобы использовать его, "
-                    f"или пришлите другой адрес.")
-        await bot.send_message(chat_id=chat_id,
-            text=f"Укажите адрес и подъезд/квартиру "
-                 f"(например: ул. Примерная, 1, под. 2, кв. 15){hint}:")
-    elif payload == "check_status":
-        await answer()
-        STATES[chat_id] = ("check_number", {})
-        await bot.send_message(chat_id=chat_id,
-            text="Пришлите номер заявки цифрами, например: 00012")
-    elif payload == "emergencies":
-        await answer()
-        await send_emergencies(chat_id)
-    elif payload == "house_info":
-        await answer()
-        await send_house_info(chat_id)
-    elif payload == "contacts":
-        await answer()
-        await bot.send_message(chat_id=chat_id, text=CONTACTS, attachments=[back_kb()])
-    else:
-        await answer()
+                text="📋 **Регистрация**\n\n"
+                     "Пришлите ваш номер телефона в формате +7 900 123-45-67.")
+        elif payload == "new_request":
+            await answer()
+            if not await get_user(chat_id):
+                STATES[chat_id] = ("reg_phone", {})
+                await bot.send_message(chat_id=chat_id,
+                    text="Чтобы оставить заявку, сначала пройдите регистрацию.\n\n"
+                         "📋 Пришлите ваш номер телефона в формате +7 900 123-45-67.")
+                return
+            await bot.send_message(chat_id=chat_id,
+                text="Выберите категорию заявки:", attachments=[category_kb()])
+        elif payload.startswith("cat_"):
+            category = payload[4:]
+            await answer()
+            user = await get_user(chat_id)
+            STATES[chat_id] = ("new_address", {
+                "category": category,
+                "profile_address": user["address"] if user else None,
+            })
+            hint = ""
+            if user:
+                hint = (f"\n\nАдрес из вашего профиля: {user['address']}.\n"
+                        f"Напишите «по адресу профиля», чтобы использовать его, "
+                        f"или пришлите другой адрес.")
+            await bot.send_message(chat_id=chat_id,
+                text=f"Укажите адрес и подъезд/квартиру "
+                     f"(например: ул. Примерная, 1, под. 2, кв. 15){hint}:")
+        elif payload == "check_status":
+            await answer()
+            STATES[chat_id] = ("check_number", {})
+            await bot.send_message(chat_id=chat_id,
+                text="Пришлите номер заявки цифрами, например: 00012")
+        elif payload == "emergencies":
+            await answer()
+            await send_emergencies(chat_id)
+        elif payload == "house_info":
+            await answer()
+            await send_house_info(chat_id)
+        elif payload == "contacts":
+            await answer()
+            await bot.send_message(chat_id=chat_id, text=CONTACTS, attachments=[back_kb()])
+        else:
+            await answer()
+    except Exception as e:
+        logging.error(f"Ошибка в обработчике callback: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def main():
     await init_db()
