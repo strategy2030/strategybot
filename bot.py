@@ -33,6 +33,9 @@ dp = Dispatcher()
 # ID сотрудников (админов), которые могут менять статусы и публиковать объявления.
 ADMIN_IDS = {82205193}
 
+# ID рабочего чата УК для уведомлений о новых заявках
+WORK_CHAT_ID = -80938009169161
+
 CONTACTS = (
     "☎️ **Контакты управляющей компании**\n\n"
     "• Диспетчерская (9:00–17:00): 8 (928) 101-44-79\n"
@@ -114,6 +117,21 @@ async def save_user(chat_id, fio, phone, address):
         )
         await conn.commit()
 
+# ---- Уведомление в рабочий чат ----
+async def notify_work_chat(req_id, category, address, description):
+    """Отправляет уведомление о новой заявке в рабочий чат УК"""
+    text = (
+        f"🚨 **Новая заявка №{req_id:05d}**\n\n"
+        f"🏠 Адрес: {address}\n"
+        f"🗂 Категория: {category}\n"
+        f"📝 Описание: {description}"
+    )
+    try:
+        await bot.send_message(chat_id=WORK_CHAT_ID, text=text)
+        logging.info(f"Уведомление о заявке №{req_id} отправлено в рабочий чат")
+    except Exception as e:
+        logging.error(f"Не удалось отправить уведомление в рабочий чат: {e}")
+
 # ---- Заявки ----
 async def create_request(chat_id, category, address, description):
     async with aiosqlite.connect(DB_PATH) as conn:
@@ -124,7 +142,12 @@ async def create_request(chat_id, category, address, description):
              datetime.now().strftime("%d.%m.%Y %H:%M")),
         )
         await conn.commit()
-        return cursor.lastrowid
+        request_id = cursor.lastrowid
+    
+    # Отправляем уведомление в рабочий чат (неблокирующе)
+    asyncio.create_task(notify_work_chat(request_id, category, address, description))
+    
+    return request_id
 
 async def get_request(number):
     async with aiosqlite.connect(DB_PATH) as conn:
@@ -162,85 +185,15 @@ async def delete_house_info(info_id):
 async def get_house_info():
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
-        cursor = await conn.execute("SELECT * FROM house_info ORDER BY id DESC LIMIT 10")
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-# ---- Работа с жильцами ----
-async def get_user(chat_id):
-    async with await get_db() as conn:
-        cursor = await conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-async def save_user(chat_id, fio, phone, address):
-    async with await get_db() as conn:
-        await conn.execute(
-            "INSERT INTO users (chat_id, fio, phone, address, registered_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET fio=?, phone=?, address=?",
-            (chat_id, fio, phone, address,
-             datetime.now().strftime("%d.%m.%Y %H:%M"), fio, phone, address),
-        )
-        await conn.commit()
-
-# ---- Заявки ----
-async def create_request(chat_id, category, address, description):
-    async with await get_db() as conn:
-        cursor = await conn.execute(
-            "INSERT INTO requests (chat_id, category, address, description, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (chat_id, category, address, description,
-             datetime.now().strftime("%d.%m.%Y %H:%M")),
-        )
-        await conn.commit()
-        return cursor.lastrowid
-
-async def get_request(number):
-    async with await get_db() as conn:
-        cursor = await conn.execute("SELECT * FROM requests WHERE id = ?", (number,))
-        row = await cursor.fetchone()
-        return dict(row) if row else None
-
-async def set_status(number, status):
-    async with await get_db() as conn:
-        await conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, number))
-        await conn.commit()
-
-# ---- Аварии и информация по дому ----
-async def get_active_emergencies():
-    async with await get_db() as conn:
-        cursor = await conn.execute("SELECT * FROM emergencies WHERE active = 1 ORDER BY id")
-        rows = await cursor.fetchall()
-        return [dict(r) for r in rows]
-
-async def add_house_info(title, text):
-    async with await get_db() as conn:
-        await conn.execute(
-            "INSERT INTO house_info (title, text, created_at) VALUES (?, ?, ?)",
-            (title, text, datetime.now().strftime("%d.%m.%Y")),
-        )
-        await conn.commit()
-
-async def delete_house_info(info_id):
-    async with await get_db() as conn:
-        await conn.execute("DELETE FROM house_info WHERE id = ?", (info_id,))
-        await conn.commit()
-
-async def get_house_info():
-    async with await get_db() as conn:
         cursor = await conn.execute("SELECT * FROM house_info ORDER BY id DESC LIMIT 10")
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
 # ---- Состояния диалога ----
-# chat_id -> ("new_category"|"new_address"|"new_text"|"check_number"
-#             |"reg_phone"|"reg_fio"|"reg_address", data)
 STATES = {}
 
 STATUSES = ["Принята", "В работе", "Выполнена", "Отклонена"]
 
-# Надежная проверка телефона: оставляем только цифры и плюс, проверяем формат
 def is_valid_phone(text: str) -> bool:
     clean_phone = re.sub(r'[^\d+]', '', text)
     return bool(re.match(r"^(\+7|8)\d{10}$", clean_phone))
@@ -257,18 +210,18 @@ def main_menu_kb():
         CallbackButton(text="🏠 Информация по дому", payload="house_info", intent=Intent.DEFAULT),
     ], [
         CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT),
-        CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.SECONDARY),
+        CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT),
     ]]))
 
 def category_kb():
     buttons = [[CallbackButton(text=c, payload=f"cat_{c}", intent=Intent.DEFAULT)]
                for c in ["Электрика", "Сантехника", "Лифт", "Кровля и фасад", "Другое"]]
-    buttons.append([CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.SECONDARY)])
+    buttons.append([CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT)])
     return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=buttons))
 
 def back_kb():
     return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[[
-        CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.SECONDARY),
+        CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT),
     ]]))
 
 def menu_text():
@@ -319,7 +272,7 @@ async def send_profile(chat_id):
                  "Нажмите «Зарегистрироваться», чтобы оставлять заявки.",
             attachments=Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[[
                 CallbackButton(text="✅ Зарегистрироваться", payload="register", intent=Intent.POSITIVE),
-            ], [CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.SECONDARY)]])),
+            ], [CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT)]])),
         )
         return
     await bot.send_message(
@@ -329,7 +282,7 @@ async def send_profile(chat_id):
              f"Адрес: {user['address']}\nЗарегистрированы: {user['registered_at']}",
         attachments=Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[[
             CallbackButton(text="✏️ Изменить данные", payload="register", intent=Intent.DEFAULT),
-        ], [CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.SECONDARY)]])),
+        ], [CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT)]])),
     )
 
 # ---- Хендлеры ----
@@ -338,7 +291,7 @@ async def send_profile(chat_id):
 async def on_started(event: BotStarted):
     await send_menu(event.chat_id)
 
-@dp.message_created(Command("start"))  # ИСПРАВЛЕНО: используем Command("start") вместо несуществующего CommandStart()
+@dp.message_created(Command("start"))
 async def cmd_start(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
     STATES.pop(chat_id, None)
@@ -364,13 +317,12 @@ async def router(event: MessageCreated):
     text = (event.message.body.text or "").strip()
 
     # --- Команды сотрудников ---
-    # ИСПРАВЛЕНО: (.+) захватывает статусы с пробелами, например "В работе"
     m = re.match(r"^/обновить\s+(\d+)\s+(.+)$", text)
     if m:
         if chat_id not in ADMIN_IDS:
             return
         number = int(m.group(1))
-        status = m.group(2).strip()  # ИСПРАВЛЕНО: убираем случайные пробелы по краям
+        status = m.group(2).strip()
         
         if status not in STATUSES:
             await bot.send_message(chat_id=chat_id,
@@ -415,7 +367,6 @@ async def router(event: MessageCreated):
     if state:
         kind, data = state
         if kind == "reg_phone":
-            # ИСПРАВЛЕНО: используем надежную функцию проверки
             if not is_valid_phone(text):
                 await bot.send_message(chat_id=chat_id,
                     text="Номер не распознан. Пришлите в формате +7 900 123-45-67:")
@@ -524,7 +475,7 @@ async def on_callback(event: MessageCallback):
         await bot.send_message(chat_id=chat_id,
             text="Выберите категорию заявки:", attachments=[category_kb()])
     elif payload.startswith("cat_"):
-        category = payload[4:]  # ИСПРАВЛЕНО: безопасная замена removeprefix для совместимости с Python 3.8+
+        category = payload[4:]
         await answer()
         user = await get_user(chat_id)
         STATES[chat_id] = ("new_address", {
@@ -558,7 +509,7 @@ async def on_callback(event: MessageCallback):
 
 async def main():
     await init_db()
-    await dp.start_polling(bot)  # для продакшена рассмотрите webhook
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     asyncio.run(main())
