@@ -457,7 +457,9 @@ async def on_callback(event: MessageCallback):
         logging.info(f"Callback: payload={payload}, chat_id={chat_id}")
 
         async def answer(notification=""):
-            await bot.send_callback(callback_id=callback_id, notification=notification)
+            # API не принимает пустую строку, поэтому отвечаем только если есть текст
+            if notification:
+                await bot.send_callback(callback_id=callback_id, notification=notification)
 
         if payload == "menu":
             STATES.pop(chat_id, None)
