@@ -5,17 +5,16 @@
 обновление статусов и публикация объявлений сотрудниками.
 
 Запуск: python bot.py
-Зависимости: pip install maxapi python-dotenv
+Зависимости: pip install maxapi python-dotenv aiosqlite
 """
 
 import asyncio
 import logging
 import os
 import re
-import sqlite3
-import threading
 from datetime import datetime
 
+import aiosqlite
 from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
@@ -44,17 +43,17 @@ CONTACTS = (
     "• Приёмные часы: пн–чт 9:00–17:00, пт 09:00–16:00"
 )
 
-# ---- База данных ----
-DB_LOCK = threading.Lock()
+# ---- База данных (асинхронная) ----
+DB_PATH = "uk_bot.db"
 
-def db():
-    conn = sqlite3.connect("uk_bot.db", check_same_thread=False)
-    conn.row_factory = sqlite3.Row
+async def get_db():
+    conn = await aiosqlite.connect(DB_PATH)
+    conn.row_factory = aiosqlite.Row
     return conn
 
-def init_db():
-    with DB_LOCK, db() as conn:
-        conn.executescript("""
+async def init_db():
+    async with await get_db() as conn:
+        await conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY,
             fio TEXT NOT NULL,
@@ -84,8 +83,10 @@ def init_db():
             created_at TEXT NOT NULL
         );
         """)
-        if conn.execute("SELECT COUNT(*) FROM emergencies").fetchone()[0] == 0:
-            conn.executemany(
+        cursor = await conn.execute("SELECT COUNT(*) FROM emergencies")
+        row = await cursor.fetchone()
+        if row[0] == 0:
+            await conn.executemany(
                 "INSERT INTO emergencies (title, description) VALUES (?, ?)",
                 [
                     ("Отключение горячей воды",
@@ -97,69 +98,73 @@ def init_db():
                      "работает. Ремонт окончен будет ориентировочно 12.11."),
                 ],
             )
+        await conn.commit()
 
 # ---- Работа с жильцами ----
-def get_user(chat_id):
-    with DB_LOCK, db() as conn:
-        row = conn.execute(
-            "SELECT * FROM users WHERE chat_id = ?", (chat_id,)
-        ).fetchone()
+async def get_user(chat_id):
+    async with await get_db() as conn:
+        cursor = await conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
+        row = await cursor.fetchone()
         return dict(row) if row else None
 
-def save_user(chat_id, fio, phone, address):
-    with DB_LOCK, db() as conn:
-        conn.execute(
+async def save_user(chat_id, fio, phone, address):
+    async with await get_db() as conn:
+        await conn.execute(
             "INSERT INTO users (chat_id, fio, phone, address, registered_at) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET fio=?, phone=?, address=?",
             (chat_id, fio, phone, address,
              datetime.now().strftime("%d.%m.%Y %H:%M"), fio, phone, address),
         )
+        await conn.commit()
 
 # ---- Заявки ----
-def create_request(chat_id, category, address, description):
-    with DB_LOCK, db() as conn:
-        cur = conn.execute(
+async def create_request(chat_id, category, address, description):
+    async with await get_db() as conn:
+        cursor = await conn.execute(
             "INSERT INTO requests (chat_id, category, address, description, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (chat_id, category, address, description,
              datetime.now().strftime("%d.%m.%Y %H:%M")),
         )
-        return cur.lastrowid
+        await conn.commit()
+        return cursor.lastrowid
 
-def get_request(number):
-    with DB_LOCK, db() as conn:
-        row = conn.execute("SELECT * FROM requests WHERE id = ?", (number,)).fetchone()
+async def get_request(number):
+    async with await get_db() as conn:
+        cursor = await conn.execute("SELECT * FROM requests WHERE id = ?", (number,))
+        row = await cursor.fetchone()
         return dict(row) if row else None
 
-def set_status(number, status):
-    with DB_LOCK, db() as conn:
-        conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, number))
+async def set_status(number, status):
+    async with await get_db() as conn:
+        await conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, number))
+        await conn.commit()
 
 # ---- Аварии и информация по дому ----
-def get_active_emergencies():
-    with DB_LOCK, db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM emergencies WHERE active = 1 ORDER BY id"
-        ).fetchall()
+async def get_active_emergencies():
+    async with await get_db() as conn:
+        cursor = await conn.execute("SELECT * FROM emergencies WHERE active = 1 ORDER BY id")
+        rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
-def add_house_info(title, text):
-    with DB_LOCK, db() as conn:
-        conn.execute(
+async def add_house_info(title, text):
+    async with await get_db() as conn:
+        await conn.execute(
             "INSERT INTO house_info (title, text, created_at) VALUES (?, ?, ?)",
             (title, text, datetime.now().strftime("%d.%m.%Y")),
         )
+        await conn.commit()
 
-def delete_house_info(info_id):
-    with DB_LOCK, db() as conn:
-        conn.execute("DELETE FROM house_info WHERE id = ?", (info_id,))
+async def delete_house_info(info_id):
+    async with await get_db() as conn:
+        await conn.execute("DELETE FROM house_info WHERE id = ?", (info_id,))
+        await conn.commit()
 
-def get_house_info():
-    with DB_LOCK, db() as conn:
-        rows = conn.execute(
-            "SELECT * FROM house_info ORDER BY id DESC LIMIT 10"
-        ).fetchall()
+async def get_house_info():
+    async with await get_db() as conn:
+        cursor = await conn.execute("SELECT * FROM house_info ORDER BY id DESC LIMIT 10")
+        rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
 # ---- Состояния диалога ----
@@ -168,7 +173,12 @@ def get_house_info():
 STATES = {}
 
 STATUSES = ["Принята", "В работе", "Выполнена", "Отклонена"]
-PHONE_RE = re.compile(r"^(\+7|8)[\s\-]?$?\d{3}$?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}$")
+
+# Надежная проверка телефона: оставляем только цифры и плюс, проверяем формат
+def is_valid_phone(text: str) -> bool:
+    clean_phone = re.sub(r'[^\d+]', '', text)
+    return bool(re.match(r"^(\+7|8)\d{10}$", clean_phone))
+
 NAME_RE = re.compile(r"^[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\- ]{2,80}$")
 
 # ---- Клавиатуры ----
@@ -206,7 +216,7 @@ async def send_menu(chat_id, text=None):
                            attachments=[main_menu_kb()])
 
 async def send_emergencies(chat_id):
-    items = get_active_emergencies()
+    items = await get_active_emergencies()
     if not items:
         await bot.send_message(
             chat_id=chat_id,
@@ -220,7 +230,7 @@ async def send_emergencies(chat_id):
     await bot.send_message(chat_id=chat_id, text=text, attachments=[back_kb()])
 
 async def send_house_info(chat_id):
-    items = get_house_info()
+    items = await get_house_info()
     if not items:
         await bot.send_message(
             chat_id=chat_id,
@@ -235,7 +245,7 @@ async def send_house_info(chat_id):
 
 # ---- Профиль и регистрация ----
 async def send_profile(chat_id):
-    user = get_user(chat_id)
+    user = await get_user(chat_id)
     if not user:
         await bot.send_message(
             chat_id=chat_id,
@@ -262,10 +272,11 @@ async def send_profile(chat_id):
 async def on_started(event: BotStarted):
     await send_menu(event.chat_id)
 
-@dp.message_created(CommandStart())
+@dp.message_created(Command("start"))  # ИСПРАВЛЕНО: используем Command("start") вместо несуществующего CommandStart()
 async def cmd_start(event: MessageCreated):
-    STATES.pop(event.message.recipient.chat_id, None)
-    await send_menu(event.message.recipient.chat_id)
+    chat_id = event.message.recipient.chat_id
+    STATES.pop(chat_id, None)
+    await send_menu(chat_id)
 
 @dp.message_created(Command("контакты"))
 async def cmd_contacts(event: MessageCreated):
@@ -287,22 +298,25 @@ async def router(event: MessageCreated):
     text = (event.message.body.text or "").strip()
 
     # --- Команды сотрудников ---
-    m = re.match(r"^/обновить\s+(\d+)\s+(\S+)\s*$", text)
+    # ИСПРАВЛЕНО: (.+) захватывает статусы с пробелами, например "В работе"
+    m = re.match(r"^/обновить\s+(\d+)\s+(.+)$", text)
     if m:
         if chat_id not in ADMIN_IDS:
             return
-        number, status = int(m.group(1)), m.group(2)
+        number = int(m.group(1))
+        status = m.group(2).strip()  # ИСПРАВЛЕНО: убираем случайные пробелы по краям
+        
         if status not in STATUSES:
             await bot.send_message(chat_id=chat_id,
                 text=f"Допустимые статусы: {', '.join(STATUSES)}")
             return
-        if not get_request(number):
+        if not await get_request(number):
             await bot.send_message(chat_id=chat_id, text=f"Заявка №{number} не найдена")
             return
-        set_status(number, status)
+        await set_status(number, status)
         await bot.send_message(chat_id=chat_id,
             text=f"Заявка №{number} → статус «{status}»")
-        req = get_request(number)
+        req = await get_request(number)
         await bot.send_message(chat_id=req["chat_id"],
             text=f"📌 Статус вашей заявки №{number} обновлён: **{status}**")
         return
@@ -312,7 +326,7 @@ async def router(event: MessageCreated):
         if chat_id not in ADMIN_IDS:
             return
         title, body = m.group(1).strip(), m.group(2).strip()
-        add_house_info(title, body)
+        await add_house_info(title, body)
         await bot.send_message(chat_id=chat_id,
             text=f"✅ Объявление «{title}» опубликовано. Жильцы увидят его в разделе "
                  f"«Информация по дому».")
@@ -322,7 +336,7 @@ async def router(event: MessageCreated):
     if m:
         if chat_id not in ADMIN_IDS:
             return
-        delete_house_info(int(m.group(1)))
+        await delete_house_info(int(m.group(1)))
         await bot.send_message(chat_id=chat_id, text="Объявление удалено")
         return
 
@@ -335,7 +349,8 @@ async def router(event: MessageCreated):
     if state:
         kind, data = state
         if kind == "reg_phone":
-            if not PHONE_RE.match(text.replace(" ", "").replace("-", "")):
+            # ИСПРАВЛЕНО: используем надежную функцию проверки
+            if not is_valid_phone(text):
                 await bot.send_message(chat_id=chat_id,
                     text="Номер не распознан. Пришлите в формате +7 900 123-45-67:")
                 return
@@ -353,18 +368,17 @@ async def router(event: MessageCreated):
                 text="Укажите адрес (например: ул. Примерная, 1, под. 2, кв. 15):")
             return
         if kind == "reg_address":
-            save_user(chat_id, data["fio"], data["phone"], text)
+            await save_user(chat_id, data["fio"], data["phone"], text)
             STATES.pop(chat_id, None)
             await bot.send_message(
                 chat_id=chat_id,
                 text=f"✅ **Регистрация завершена!**\n\n"
                      f"ФИО: {data['fio']}\nТелефон: {data['phone']}\nАдрес: {text}\n\n"
                      f"Теперь вы можете оставлять заявки.",
-                attachments=main_menu_kb(),
+                attachments=[main_menu_kb()],
             )
             return
         if kind == "new_address":
-            # Можно подставить адрес из профиля одной фразой
             if text.lower().strip() == "по адресу профиля" and data.get("profile_address"):
                 data["address"] = data["profile_address"]
             else:
@@ -374,8 +388,8 @@ async def router(event: MessageCreated):
                 text="Опишите проблему одним сообщением (что и где случилось):")
             return
         if kind == "new_text":
-            user = get_user(chat_id)
-            number = create_request(chat_id, data["category"], data["address"], text)
+            user = await get_user(chat_id)
+            number = await create_request(chat_id, data["category"], data["address"], text)
             STATES.pop(chat_id, None)
             await bot.send_message(chat_id=chat_id,
                 text=f"✅ **Заявка принята!**\n\n"
@@ -393,7 +407,7 @@ async def router(event: MessageCreated):
                     text="Не понял номер. Пришлите, пожалуйста, просто цифры, "
                          "например: 00012", attachments=[back_kb()])
                 return
-            req = get_request(int(m2.group(1)))
+            req = await get_request(int(m2.group(1)))
             if not req:
                 await bot.send_message(chat_id=chat_id,
                     text=f"Заявки №{m2.group(1)} не найдено. Проверьте номер.",
@@ -435,7 +449,7 @@ async def on_callback(event: MessageCallback):
                  "Пришлите ваш номер телефона в формате +7 900 123-45-67.")
     elif payload == "new_request":
         await answer()
-        if not get_user(chat_id):
+        if not await get_user(chat_id):
             STATES[chat_id] = ("reg_phone", {})
             await bot.send_message(chat_id=chat_id,
                 text="Чтобы оставить заявку, сначала пройдите регистрацию.\n\n"
@@ -444,9 +458,9 @@ async def on_callback(event: MessageCallback):
         await bot.send_message(chat_id=chat_id,
             text="Выберите категорию заявки:", attachments=[category_kb()])
     elif payload.startswith("cat_"):
-        category = payload.removeprefix("cat_")
+        category = payload[4:]  # ИСПРАВЛЕНО: безопасная замена removeprefix для совместимости с Python 3.8+
         await answer()
-        user = get_user(chat_id)
+        user = await get_user(chat_id)
         STATES[chat_id] = ("new_address", {
             "category": category,
             "profile_address": user["address"] if user else None,
@@ -477,7 +491,7 @@ async def on_callback(event: MessageCallback):
         await answer()
 
 async def main():
-    init_db()
+    await init_db()
     await dp.start_polling(bot)  # для продакшена рассмотрите webhook
 
 if __name__ == "__main__":
