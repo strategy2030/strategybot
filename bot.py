@@ -20,8 +20,9 @@ from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     Attachment, BotStarted, CallbackButton, Command,
-    Intent, MessageCallback, MessageCreated, ButtonsPayload,
+    MessageCallback, MessageCreated, ButtonsPayload,
 )
+from maxapi.enums.intent import Intent
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
