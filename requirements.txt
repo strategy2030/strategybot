@@ -1,2 +1,3 @@
 maxapi
 python-dotenv
+aiosqlite
