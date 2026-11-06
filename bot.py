@@ -46,13 +46,8 @@ CONTACTS = (
 # ---- База данных (асинхронная) ----
 DB_PATH = "uk_bot.db"
 
-async def get_db():
-    conn = await aiosqlite.connect(DB_PATH)
-    conn.row_factory = aiosqlite.Row
-    return conn
-
 async def init_db():
-    async with await get_db() as conn:
+    async with aiosqlite.connect(DB_PATH) as conn:
         await conn.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             chat_id INTEGER PRIMARY KEY,
@@ -99,6 +94,77 @@ async def init_db():
                 ],
             )
         await conn.commit()
+
+# ---- Работа с жильцами ----
+async def get_user(chat_id):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM users WHERE chat_id = ?", (chat_id,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+async def save_user(chat_id, fio, phone, address):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO users (chat_id, fio, phone, address, registered_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET fio=?, phone=?, address=?",
+            (chat_id, fio, phone, address,
+             datetime.now().strftime("%d.%m.%Y %H:%M"), fio, phone, address),
+        )
+        await conn.commit()
+
+# ---- Заявки ----
+async def create_request(chat_id, category, address, description):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cursor = await conn.execute(
+            "INSERT INTO requests (chat_id, category, address, description, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (chat_id, category, address, description,
+             datetime.now().strftime("%d.%m.%Y %H:%M")),
+        )
+        await conn.commit()
+        return cursor.lastrowid
+
+async def get_request(number):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM requests WHERE id = ?", (number,))
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+async def set_status(number, status):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("UPDATE requests SET status = ? WHERE id = ?", (status, number))
+        await conn.commit()
+
+# ---- Аварии и информация по дому ----
+async def get_active_emergencies():
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM emergencies WHERE active = 1 ORDER BY id")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+async def add_house_info(title, text):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT INTO house_info (title, text, created_at) VALUES (?, ?, ?)",
+            (title, text, datetime.now().strftime("%d.%m.%Y")),
+        )
+        await conn.commit()
+
+async def delete_house_info(info_id):
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute("DELETE FROM house_info WHERE id = ?", (info_id,))
+        await conn.commit()
+
+async def get_house_info():
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute("SELECT * FROM house_info ORDER BY id DESC LIMIT 10")
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
 # ---- Работа с жильцами ----
 async def get_user(chat_id):
