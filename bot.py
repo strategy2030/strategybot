@@ -31,7 +31,7 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
 # ID сотрудников (админов), которые могут менять статусы и публиковать объявления.
-ADMIN_IDS = {82205193}
+ADMIN_IDS = {82205193, 6198981}
 
 # ID рабочего чата УК для уведомлений о новых заявках
 WORK_CHAT_ID = -80938009169161
@@ -144,9 +144,7 @@ async def create_request(chat_id, category, address, description):
         await conn.commit()
         request_id = cursor.lastrowid
     
-    # Отправляем уведомление в рабочий чат (неблокирующе)
     asyncio.create_task(notify_work_chat(request_id, category, address, description))
-    
     return request_id
 
 async def get_request(number):
@@ -155,6 +153,16 @@ async def get_request(number):
         cursor = await conn.execute("SELECT * FROM requests WHERE id = ?", (number,))
         row = await cursor.fetchone()
         return dict(row) if row else None
+
+async def get_recent_requests(limit=20):
+    """Получить последние заявки для админ-панели"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cursor = await conn.execute(
+            "SELECT * FROM requests ORDER BY id DESC LIMIT ?", (limit,)
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
 
 async def set_status(number, status):
     async with aiosqlite.connect(DB_PATH) as conn:
@@ -201,17 +209,37 @@ def is_valid_phone(text: str) -> bool:
 NAME_RE = re.compile(r"^[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\- ]{2,80}$")
 
 # ---- Клавиатуры ----
-def main_menu_kb():
-    return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[[
-        CallbackButton(text="📝 Оставить заявку", payload="new_request", intent=Intent.POSITIVE),
-        CallbackButton(text="🔍 Статус заявки", payload="check_status", intent=Intent.DEFAULT),
-    ], [
-        CallbackButton(text="🚨 Аварийные ситуации", payload="emergencies", intent=Intent.NEGATIVE),
-        CallbackButton(text="🏠 Информация по дому", payload="house_info", intent=Intent.DEFAULT),
-    ], [
-        CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT),
-        CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT),
-    ]]))
+def main_menu_kb(chat_id=None):
+    """Главное меню. Для админов добавляется кнопка АДМ."""
+    buttons = [
+        [CallbackButton(text="📝 Оставить заявку", payload="new_request", intent=Intent.POSITIVE),
+         CallbackButton(text="🔍 Статус заявки", payload="check_status", intent=Intent.DEFAULT)],
+        [CallbackButton(text="🚨 Аварийные ситуации", payload="emergencies", intent=Intent.NEGATIVE),
+         CallbackButton(text="🏠 Информация по дому", payload="house_info", intent=Intent.DEFAULT)],
+        [CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT),
+         CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT)],
+    ]
+    # Добавляем кнопку АДМ только для админов
+    if chat_id in ADMIN_IDS:
+        buttons.append([CallbackButton(text="⚙️ АДМ", payload="admin_menu", intent=Intent.DEFAULT)])
+    return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=buttons))
+
+def admin_menu_kb():
+    """Меню администратора"""
+    return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[
+        [CallbackButton(text="📝 Изменить статус заявки", payload="admin_change_status", intent=Intent.DEFAULT)],
+        [CallbackButton(text="📢 Опубликовать объявление", payload="admin_new_announcement", intent=Intent.DEFAULT)],
+        [CallbackButton(text="📋 Список заявок", payload="admin_requests_list", intent=Intent.DEFAULT)],
+        [CallbackButton(text="🗑 Удалить объявление", payload="admin_delete_announcement", intent=Intent.DEFAULT)],
+        [CallbackButton(text="⬅️ В главное меню", payload="menu", intent=Intent.SECONDARY if hasattr(Intent, 'SECONDARY') else Intent.DEFAULT)],
+    ]))
+
+def status_kb(request_id):
+    """Клавиатура со статусами для смены"""
+    buttons = [[CallbackButton(text=s, payload=f"set_status_{request_id}_{s}", intent=Intent.DEFAULT)]
+               for s in STATUSES]
+    buttons.append([CallbackButton(text="❌ Отмена", payload="admin_menu", intent=Intent.DEFAULT)])
+    return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=buttons))
 
 def category_kb():
     buttons = [[CallbackButton(text=c, payload=f"cat_{c}", intent=Intent.DEFAULT)]
@@ -224,15 +252,29 @@ def back_kb():
         CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT),
     ]]))
 
+def admin_back_kb():
+    """Кнопка возврата в админ-меню"""
+    return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[[
+        CallbackButton(text="⬅️ В админ-меню", payload="admin_menu", intent=Intent.DEFAULT),
+    ]]))
+
 def menu_text():
     return ("🏠 **УК «Стратегия 2030» — бот обслуживания**\n\n"
             "Выберите действие на кнопках или напишите:\n"
             "/start — меню\n/контакты — контакты УК\n"
             "/аварии — аварийные ситуации\n/инфо — объявления по дому")
 
+def admin_menu_text():
+    return ("⚙️ **Админ-панель**\n\n"
+            "Выберите действие:")
+
 async def send_menu(chat_id, text=None):
     await bot.send_message(chat_id=chat_id, text=text or menu_text(),
-                           attachments=[main_menu_kb()])
+                           attachments=[main_menu_kb(chat_id)])
+
+async def send_admin_menu(chat_id):
+    await bot.send_message(chat_id=chat_id, text=admin_menu_text(),
+                           attachments=[admin_menu_kb()])
 
 async def send_emergencies(chat_id):
     items = await get_active_emergencies()
@@ -289,12 +331,10 @@ async def send_profile(chat_id):
 
 @dp.bot_started()
 async def on_started(event: BotStarted):
-    """Отправляет меню при первом запуске бота"""
     await send_menu(event.chat_id)
 
 @dp.message_created(Command("start"))
 async def cmd_start(event: MessageCreated):
-    """Отправляет меню при команде /start"""
     chat_id = event.message.recipient.chat_id
     STATES.pop(chat_id, None)
     await send_menu(chat_id)
@@ -318,48 +358,6 @@ async def router(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
     text = (event.message.body.text or "").strip()
 
-    # --- Команды сотрудников ---
-    m = re.match(r"^/обновить\s+(\d+)\s+(.+)$", text)
-    if m:
-        if chat_id not in ADMIN_IDS:
-            return
-        number = int(m.group(1))
-        status = m.group(2).strip()
-        
-        if status not in STATUSES:
-            await bot.send_message(chat_id=chat_id,
-                text=f"Допустимые статусы: {', '.join(STATUSES)}")
-            return
-        if not await get_request(number):
-            await bot.send_message(chat_id=chat_id, text=f"Заявка №{number} не найдена")
-            return
-        await set_status(number, status)
-        await bot.send_message(chat_id=chat_id,
-            text=f"Заявка №{number} → статус «{status}»")
-        req = await get_request(number)
-        await bot.send_message(chat_id=req["chat_id"],
-            text=f"📌 Статус вашей заявки №{number} обновлён: **{status}**")
-        return
-
-    m = re.match(r"^/объявление\s+([^|]+)\|(.+)\s*$", text, re.S)
-    if m:
-        if chat_id not in ADMIN_IDS:
-            return
-        title, body = m.group(1).strip(), m.group(2).strip()
-        await add_house_info(title, body)
-        await bot.send_message(chat_id=chat_id,
-            text=f"✅ Объявление «{title}» опубликовано. Жильцы увидят его в разделе "
-                 f"«Информация по дому».")
-        return
-
-    m = re.match(r"^/удалить_объявление\s+(\d+)$", text)
-    if m:
-        if chat_id not in ADMIN_IDS:
-            return
-        await delete_house_info(int(m.group(1)))
-        await bot.send_message(chat_id=chat_id, text="Объявление удалено")
-        return
-
     if text.startswith("/"):
         await send_menu(chat_id)
         return
@@ -368,6 +366,8 @@ async def router(event: MessageCreated):
     state = STATES.get(chat_id)
     if state:
         kind, data = state
+
+        # --- Регистрация ---
         if kind == "reg_phone":
             if not is_valid_phone(text):
                 await bot.send_message(chat_id=chat_id,
@@ -394,9 +394,11 @@ async def router(event: MessageCreated):
                 text=f"✅ **Регистрация завершена!**\n\n"
                      f"ФИО: {data['fio']}\nТелефон: {data['phone']}\nАдрес: {text}\n\n"
                      f"Теперь вы можете оставлять заявки.",
-                attachments=[main_menu_kb()],
+                attachments=[main_menu_kb(chat_id)],
             )
             return
+
+        # --- Создание заявки ---
         if kind == "new_address":
             if text.lower().strip() == "по адресу профиля" and data.get("profile_address"):
                 data["address"] = data["profile_address"]
@@ -416,7 +418,7 @@ async def router(event: MessageCreated):
                      f"Категория: {data['category']}\nАдрес: {data['address']}\n"
                      f"Заявитель: {user['fio']}\n\n"
                      f"По номеру заявки вы всегда можете узнать её статус.",
-                attachments=[main_menu_kb()])
+                attachments=[main_menu_kb(chat_id)])
             return
         if kind == "check_number":
             STATES.pop(chat_id, None)
@@ -441,26 +443,76 @@ async def router(event: MessageCreated):
                     attachments=[back_kb()])
             return
 
+        # --- АДМИН: ввод номера заявки для смены статуса ---
+        if kind == "admin_wait_request_number":
+            m2 = re.match(r"^(\d{1,7})$", text.replace("№", "").strip())
+            if not m2:
+                await bot.send_message(chat_id=chat_id,
+                    text="Не понял номер. Пришлите просто цифры, например: 12\n"
+                         "Или нажмите «❌ Отмена».",
+                    attachments=[admin_back_kb()])
+                return
+            req = await get_request(int(m2.group(1)))
+            if not req:
+                await bot.send_message(chat_id=chat_id,
+                    text=f"Заявки №{m2.group(1)} не найдено. Проверьте номер.\n\n"
+                         f"Используйте «📋 Список заявок», чтобы увидеть актуальные номера.",
+                    attachments=[admin_back_kb()])
+                return
+            STATES.pop(chat_id, None)
+            await bot.send_message(chat_id=chat_id,
+                text=f"📝 **Заявка №{req['id']:05d}**\n"
+                     f"Категория: {req['category']}\n"
+                     f"Адрес: {req['address']}\n"
+                     f"Создана: {req['created_at']}\n"
+                     f"Текущий статус: **{req['status']}**\n\n"
+                     f"Выберите новый статус:",
+                attachments=[status_kb(req['id'])])
+            return
+
+        # --- АДМИН: ввод заголовка объявления ---
+        if kind == "admin_wait_announcement_title":
+            if len(text) < 3 or len(text) > 100:
+                await bot.send_message(chat_id=chat_id,
+                    text="Заголовок должен быть от 3 до 100 символов. Попробуйте ещё раз:",
+                    attachments=[admin_back_kb()])
+                return
+            STATES[chat_id] = ("admin_wait_announcement_text", {"title": text})
+            await bot.send_message(chat_id=chat_id,
+                text=f"✅ Заголовок: **{text}**\n\n"
+                     f"Теперь пришлите текст объявления (можно несколько абзацев):")
+            return
+
+        # --- АДМИН: ввод текста объявления ---
+        if kind == "admin_wait_announcement_text":
+            title = data["title"]
+            await add_house_info(title, text)
+            STATES.pop(chat_id, None)
+            await bot.send_message(chat_id=chat_id,
+                text=f"✅ **Объявление опубликовано!**\n\n"
+                     f"📌 Заголовок: {title}\n"
+                     f"📝 Текст: {text}\n\n"
+                     f"Жильцы увидят его в разделе «Информация по дому».",
+                attachments=[admin_menu_kb()])
+            return
+
     await send_menu(chat_id, "Не понял сообщение 🙂 Выберите действие на кнопке:")
 
 # Callback-события от кнопок
 @dp.message_callback()
 async def on_callback(event: MessageCallback):
-    """Обработчик нажатий на inline-кнопки"""
     try:
         payload = event.callback.payload
         callback_id = event.callback.callback_id
-        
-        # Получаем chat_id из объекта chat
         chat_id = event.chat.chat_id if hasattr(event.chat, 'chat_id') else event.chat.id
-        
+
         logging.info(f"Callback: payload={payload}, chat_id={chat_id}")
 
         async def answer(notification=""):
-            # API не принимает пустую строку, поэтому отвечаем только если есть текст
             if notification:
                 await bot.send_callback(callback_id=callback_id, notification=notification)
 
+        # --- Главное меню ---
         if payload == "menu":
             STATES.pop(chat_id, None)
             await answer()
@@ -504,7 +556,8 @@ async def on_callback(event: MessageCallback):
             await answer()
             STATES[chat_id] = ("check_number", {})
             await bot.send_message(chat_id=chat_id,
-                text="Пришлите номер заявки цифрами, например: 00012")
+                text="Пришлите номер заявки цифрами, например: 00012",
+                attachments=[admin_back_kb() if chat_id in ADMIN_IDS else back_kb()])
         elif payload == "emergencies":
             await answer()
             await send_emergencies(chat_id)
@@ -514,6 +567,144 @@ async def on_callback(event: MessageCallback):
         elif payload == "contacts":
             await answer()
             await bot.send_message(chat_id=chat_id, text=CONTACTS, attachments=[back_kb()])
+
+        # --- АДМИН-МЕНЮ ---
+        elif payload == "admin_menu":
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            STATES.pop(chat_id, None)
+            await send_admin_menu(chat_id)
+
+        elif payload == "admin_change_status":
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            STATES[chat_id] = ("admin_wait_request_number", {})
+            await bot.send_message(chat_id=chat_id,
+                text="📝 **Смена статуса заявки**\n\n"
+                     "Пришлите номер заявки цифрами (например: 12).\n"
+                     "Или нажмите «📋 Список заявок», чтобы увидеть актуальные номера.",
+                attachments=[Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[
+                    [CallbackButton(text="📋 Список заявок", payload="admin_requests_list", intent=Intent.DEFAULT)],
+                    [CallbackButton(text="❌ Отмена", payload="admin_menu", intent=Intent.DEFAULT)],
+                ]))])
+
+        elif payload == "admin_requests_list":
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            requests_list = await get_recent_requests(20)
+            if not requests_list:
+                await bot.send_message(chat_id=chat_id,
+                    text="📋 Заявок пока нет.",
+                    attachments=[admin_menu_kb()])
+                return
+            text = "📋 **Последние заявки (до 20):**\n\n"
+            for r in requests_list:
+                text += (f"№ **{r['id']:05d}** | {r['status']} | {r['category']}\n"
+                         f"   🏠 {r['address']}\n"
+                         f"   📅 {r['created_at']}\n\n")
+            text += "Чтобы сменить статус, нажмите кнопку ниже и пришлите номер заявки."
+            await bot.send_message(chat_id=chat_id, text=text,
+                attachments=[Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=[
+                    [CallbackButton(text="📝 Сменить статус заявки", payload="admin_change_status", intent=Intent.DEFAULT)],
+                    [CallbackButton(text="⬅️ В админ-меню", payload="admin_menu", intent=Intent.DEFAULT)],
+                ]))])
+
+        elif payload == "admin_new_announcement":
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            STATES[chat_id] = ("admin_wait_announcement_title", {})
+            await bot.send_message(chat_id=chat_id,
+                text="📢 **Публикация объявления**\n\n"
+                     "Пришлите заголовок объявления (от 3 до 100 символов):",
+                attachments=[admin_back_kb()])
+
+        elif payload == "admin_delete_announcement":
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            items = await get_house_info()
+            if not items:
+                await bot.send_message(chat_id=chat_id,
+                    text="🗑 Объявлений для удаления нет.",
+                    attachments=[admin_menu_kb()])
+                return
+            text = "🗑 **Удаление объявления**\n\nВыберите, какое объявление удалить:"
+            buttons = [[CallbackButton(
+                text=f"❌ {i['title'][:30]} ({i['created_at']})",
+                payload=f"admin_confirm_del_{i['id']}",
+                intent=Intent.NEGATIVE
+            )] for i in items]
+            buttons.append([CallbackButton(text="⬅️ Назад", payload="admin_menu", intent=Intent.DEFAULT)])
+            await bot.send_message(chat_id=chat_id, text=text,
+                attachments=[Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=buttons))])
+
+        elif payload.startswith("admin_confirm_del_"):
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            try:
+                info_id = int(payload.split("_")[-1])
+            except (ValueError, IndexError):
+                await bot.send_message(chat_id=chat_id, text="Ошибка ID.")
+                return
+            await delete_house_info(info_id)
+            await bot.send_message(chat_id=chat_id,
+                text=f"✅ Объявление №{info_id} удалено.",
+                attachments=[admin_menu_kb()])
+
+        # --- Смена статуса через кнопки ---
+        elif payload.startswith("set_status_"):
+            await answer()
+            if chat_id not in ADMIN_IDS:
+                await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
+                return
+            # Формат: set_status_{request_id}_{status}
+            # Но статус может содержать пробелы ("В работе"), поэтому парсим аккуратно
+            # Убираем префикс "set_status_"
+            rest = payload[len("set_status_"):]
+            # Находим первый символ '_', который разделяет id и статус
+            sep_idx = rest.find("_")
+            if sep_idx == -1:
+                await bot.send_message(chat_id=chat_id, text="Ошибка формата.")
+                return
+            try:
+                request_id = int(rest[:sep_idx])
+                status = rest[sep_idx+1:]
+            except ValueError:
+                await bot.send_message(chat_id=chat_id, text="Ошибка ID.")
+                return
+
+            if status not in STATUSES:
+                await bot.send_message(chat_id=chat_id,
+                    text=f"Неизвестный статус: {status}")
+                return
+            req = await get_request(request_id)
+            if not req:
+                await bot.send_message(chat_id=chat_id,
+                    text=f"Заявка №{request_id} не найдена.",
+                    attachments=[admin_menu_kb()])
+                return
+            await set_status(request_id, status)
+            await bot.send_message(chat_id=chat_id,
+                text=f"✅ Заявка №{request_id:05d} → статус «**{status}**»")
+            # Уведомляем жильца
+            try:
+                await bot.send_message(chat_id=req["chat_id"],
+                    text=f"📌 Статус вашей заявки №{request_id:05d} обновлён: **{status}**")
+            except Exception as e:
+                logging.error(f"Не удалось уведомить жильца: {e}")
+            await send_admin_menu(chat_id)
+
         else:
             await answer()
     except Exception as e:
