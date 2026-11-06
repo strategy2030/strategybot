@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from maxapi import Bot, Dispatcher
 from maxapi.types import (
     Attachment, BotStarted, CallbackButton, Command,
-    MessageCreated, ButtonsPayload,
+    MessageCallback, MessageCreated, ButtonsPayload,
 )
 from maxapi.enums.intent import Intent
 
@@ -444,13 +444,13 @@ async def router(event: MessageCreated):
     await send_menu(chat_id, "Не понял сообщение 🙂 Выберите действие на кнопке:")
 
 # Callback-события от кнопок
-@dp.callback_query()
-async def on_callback(event):
+@dp.message_callback()
+async def on_callback(event: MessageCallback):
     """Обработчик нажатий на inline-кнопки"""
     try:
-        payload = event.payload
-        chat_id = event.chat_id
-        callback_id = event.callback_id
+        payload = event.callback.payload
+        chat_id = event.callback.message.recipient.chat_id
+        callback_id = event.callback.callback_id
 
         logging.info(f"Callback получен: payload={payload}, chat_id={chat_id}")
 
