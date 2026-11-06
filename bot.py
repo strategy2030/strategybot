@@ -30,14 +30,14 @@ BOT_TOKEN = os.getenv("MAX_BOT_TOKEN")
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 
-# ID сотрудников (админов), которые могут менять статусы и публиковать объявления.
+# ID сотрудников (админов) — используем USER_ID, а не chat_id!
 ADMIN_IDS = {82205193, 6198981}
 
 # ID рабочего чата УК для уведомлений о новых заявках
 WORK_CHAT_ID = -80938009169161
 
 CONTACTS = (
-    "☎️ **Контакты управляющей компании**\n\n"
+    "☎️ **Контакты УК Стратегия 2030**\n\n"
     "• Диспетчерская (9:00–17:00): 8 (928) 101-44-79\n"
     "• Аварийная служба: 8 (863) 303-20-03\n"
     "• Приёмная: 8 (928) 101-44-79\n"
@@ -209,8 +209,8 @@ def is_valid_phone(text: str) -> bool:
 NAME_RE = re.compile(r"^[А-ЯЁа-яёA-Za-z][А-ЯЁа-яёA-Za-z\- ]{2,80}$")
 
 # ---- Клавиатуры ----
-def main_menu_kb(chat_id=None):
-    """Главное меню. Для админов добавляется кнопка АДМ."""
+def main_menu_kb(user_id=None):
+    """Главное меню. Для админов добавляется кнопка АДМ (по user_id)."""
     buttons = [
         [CallbackButton(text="📝 Оставить заявку", payload="new_request", intent=Intent.POSITIVE),
          CallbackButton(text="🔍 Статус заявки", payload="check_status", intent=Intent.DEFAULT)],
@@ -219,8 +219,8 @@ def main_menu_kb(chat_id=None):
         [CallbackButton(text="☎️ Контакты", payload="contacts", intent=Intent.DEFAULT),
          CallbackButton(text="👤 Профиль", payload="profile", intent=Intent.DEFAULT)],
     ]
-    # Добавляем кнопку АДМ только для админов
-    if chat_id in ADMIN_IDS:
+    # Добавляем кнопку АДМ только для админов (по user_id!)
+    if user_id in ADMIN_IDS:
         buttons.append([CallbackButton(text="⚙️ АДМ", payload="admin_menu", intent=Intent.DEFAULT)])
     return Attachment(type="inline_keyboard", payload=ButtonsPayload(buttons=buttons))
 
@@ -231,7 +231,7 @@ def admin_menu_kb():
         [CallbackButton(text="📢 Опубликовать объявление", payload="admin_new_announcement", intent=Intent.DEFAULT)],
         [CallbackButton(text="📋 Список заявок", payload="admin_requests_list", intent=Intent.DEFAULT)],
         [CallbackButton(text="🗑 Удалить объявление", payload="admin_delete_announcement", intent=Intent.DEFAULT)],
-        [CallbackButton(text="⬅️ В главное меню", payload="menu", intent=Intent.SECONDARY if hasattr(Intent, 'SECONDARY') else Intent.DEFAULT)],
+        [CallbackButton(text="⬅️ В главное меню", payload="menu", intent=Intent.DEFAULT)],
     ]))
 
 def status_kb(request_id):
@@ -268,9 +268,9 @@ def admin_menu_text():
     return ("⚙️ **Админ-панель**\n\n"
             "Выберите действие:")
 
-async def send_menu(chat_id, text=None):
+async def send_menu(chat_id, user_id=None, text=None):
     await bot.send_message(chat_id=chat_id, text=text or menu_text(),
-                           attachments=[main_menu_kb(chat_id)])
+                           attachments=[main_menu_kb(user_id)])
 
 async def send_admin_menu(chat_id):
     await bot.send_message(chat_id=chat_id, text=admin_menu_text(),
@@ -327,17 +327,50 @@ async def send_profile(chat_id):
         ], [CallbackButton(text="⬅️ В меню", payload="menu", intent=Intent.DEFAULT)]])),
     )
 
+# ---- Вспомогательная функция для получения user_id ----
+def get_user_id_from_message(event: MessageCreated):
+    """Безопасно извлекает user_id из события MessageCreated"""
+    try:
+        if hasattr(event.message, 'sender') and event.message.sender:
+            return event.message.sender.user_id
+        if hasattr(event, 'user') and event.user:
+            return event.user.user_id
+    except Exception as e:
+        logging.error(f"Не удалось получить user_id: {e}")
+    return None
+
+def get_user_id_from_callback(event: MessageCallback):
+    """Безопасно извлекает user_id из события MessageCallback"""
+    try:
+        # Пробуем разные варианты — структура может отличаться
+        if hasattr(event, 'user') and event.user and hasattr(event.user, 'user_id'):
+            return event.user.user_id
+        if hasattr(event, 'callback') and event.callback:
+            cb = event.callback
+            if hasattr(cb, 'user') and cb.user and hasattr(cb.user, 'user_id'):
+                return cb.user.user_id
+    except Exception as e:
+        logging.error(f"Не удалось получить user_id из callback: {e}")
+    return None
+
 # ---- Хендлеры ----
 
 @dp.bot_started()
 async def on_started(event: BotStarted):
-    await send_menu(event.chat_id)
+    chat_id = event.chat_id
+    user_id = None
+    if hasattr(event, 'user') and event.user:
+        user_id = event.user.user_id
+    elif hasattr(event, 'user_id'):
+        user_id = event.user_id
+    await send_menu(chat_id, user_id)
 
 @dp.message_created(Command("start"))
 async def cmd_start(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
+    user_id = get_user_id_from_message(event)
     STATES.pop(chat_id, None)
-    await send_menu(chat_id)
+    await send_menu(chat_id, user_id)
 
 @dp.message_created(Command("контакты"))
 async def cmd_contacts(event: MessageCreated):
@@ -352,14 +385,29 @@ async def cmd_emergencies(event: MessageCreated):
 async def cmd_info(event: MessageCreated):
     await send_house_info(event.message.recipient.chat_id)
 
+# Команда для отладки — показывает ID пользователя
+@dp.message_created(Command("whoami"))
+async def cmd_whoami(event: MessageCreated):
+    chat_id = event.message.recipient.chat_id
+    user_id = get_user_id_from_message(event)
+    is_admin = "✅ Да" if user_id in ADMIN_IDS else "❌ Нет"
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"🔍 **Твои ID:**\n\n"
+             f"📌 chat_id: `{chat_id}`\n"
+             f"👤 user_id: `{user_id}`\n\n"
+             f"🛡 Являешься админом: {is_admin}"
+    )
+
 # Обработка текстовых сообщений
 @dp.message_created()
 async def router(event: MessageCreated):
     chat_id = event.message.recipient.chat_id
+    user_id = get_user_id_from_message(event)
     text = (event.message.body.text or "").strip()
 
     if text.startswith("/"):
-        await send_menu(chat_id)
+        await send_menu(chat_id, user_id)
         return
 
     # --- Машина состояний ---
@@ -394,7 +442,7 @@ async def router(event: MessageCreated):
                 text=f"✅ **Регистрация завершена!**\n\n"
                      f"ФИО: {data['fio']}\nТелефон: {data['phone']}\nАдрес: {text}\n\n"
                      f"Теперь вы можете оставлять заявки.",
-                attachments=[main_menu_kb(chat_id)],
+                attachments=[main_menu_kb(user_id)],
             )
             return
 
@@ -418,7 +466,7 @@ async def router(event: MessageCreated):
                      f"Категория: {data['category']}\nАдрес: {data['address']}\n"
                      f"Заявитель: {user['fio']}\n\n"
                      f"По номеру заявки вы всегда можете узнать её статус.",
-                attachments=[main_menu_kb(chat_id)])
+                attachments=[main_menu_kb(user_id)])
             return
         if kind == "check_number":
             STATES.pop(chat_id, None)
@@ -496,7 +544,7 @@ async def router(event: MessageCreated):
                 attachments=[admin_menu_kb()])
             return
 
-    await send_menu(chat_id, "Не понял сообщение 🙂 Выберите действие на кнопке:")
+    await send_menu(chat_id, user_id, "Не понял сообщение 🙂 Выберите действие на кнопке:")
 
 # Callback-события от кнопок
 @dp.message_callback()
@@ -505,8 +553,9 @@ async def on_callback(event: MessageCallback):
         payload = event.callback.payload
         callback_id = event.callback.callback_id
         chat_id = event.chat.chat_id if hasattr(event.chat, 'chat_id') else event.chat.id
+        user_id = get_user_id_from_callback(event)
 
-        logging.info(f"Callback: payload={payload}, chat_id={chat_id}")
+        logging.info(f"Callback: payload={payload}, chat_id={chat_id}, user_id={user_id}")
 
         async def answer(notification=""):
             if notification:
@@ -516,7 +565,7 @@ async def on_callback(event: MessageCallback):
         if payload == "menu":
             STATES.pop(chat_id, None)
             await answer()
-            await send_menu(chat_id)
+            await send_menu(chat_id, user_id)
         elif payload == "profile":
             await answer()
             await send_profile(chat_id)
@@ -557,7 +606,7 @@ async def on_callback(event: MessageCallback):
             STATES[chat_id] = ("check_number", {})
             await bot.send_message(chat_id=chat_id,
                 text="Пришлите номер заявки цифрами, например: 00012",
-                attachments=[admin_back_kb() if chat_id in ADMIN_IDS else back_kb()])
+                attachments=[admin_back_kb() if user_id in ADMIN_IDS else back_kb()])
         elif payload == "emergencies":
             await answer()
             await send_emergencies(chat_id)
@@ -571,7 +620,7 @@ async def on_callback(event: MessageCallback):
         # --- АДМИН-МЕНЮ ---
         elif payload == "admin_menu":
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             STATES.pop(chat_id, None)
@@ -579,7 +628,7 @@ async def on_callback(event: MessageCallback):
 
         elif payload == "admin_change_status":
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             STATES[chat_id] = ("admin_wait_request_number", {})
@@ -594,7 +643,7 @@ async def on_callback(event: MessageCallback):
 
         elif payload == "admin_requests_list":
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             requests_list = await get_recent_requests(20)
@@ -617,7 +666,7 @@ async def on_callback(event: MessageCallback):
 
         elif payload == "admin_new_announcement":
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             STATES[chat_id] = ("admin_wait_announcement_title", {})
@@ -628,7 +677,7 @@ async def on_callback(event: MessageCallback):
 
         elif payload == "admin_delete_announcement":
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             items = await get_house_info()
@@ -649,7 +698,7 @@ async def on_callback(event: MessageCallback):
 
         elif payload.startswith("admin_confirm_del_"):
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
             try:
@@ -665,14 +714,10 @@ async def on_callback(event: MessageCallback):
         # --- Смена статуса через кнопки ---
         elif payload.startswith("set_status_"):
             await answer()
-            if chat_id not in ADMIN_IDS:
+            if user_id not in ADMIN_IDS:
                 await bot.send_message(chat_id=chat_id, text="⛔ Доступ запрещён.")
                 return
-            # Формат: set_status_{request_id}_{status}
-            # Но статус может содержать пробелы ("В работе"), поэтому парсим аккуратно
-            # Убираем префикс "set_status_"
             rest = payload[len("set_status_"):]
-            # Находим первый символ '_', который разделяет id и статус
             sep_idx = rest.find("_")
             if sep_idx == -1:
                 await bot.send_message(chat_id=chat_id, text="Ошибка формата.")
